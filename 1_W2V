@@ -1,0 +1,173 @@
+# 1. 라이브러리 설치
+# !pip install gensim pandas scikit-learn scipy umap-learn
+
+import pandas as pd
+import numpy as np
+import os
+from gensim.models import Word2Vec
+from scipy.cluster.hierarchy import linkage, fcluster
+from sklearn.preprocessing import normalize
+from sklearn.metrics import silhouette_score
+from sklearn.metrics.pairwise import cosine_similarity
+from collections import defaultdict
+import umap.umap_ as umap
+from google.colab import drive
+
+# 2. 드라이브 마운트
+drive.mount('/content/drive')
+
+# Configuration
+INPUT_FILE_PATH = '/content/drive/MyDrive/복지/김보현/휴먼전처리/def3_fill.csv'
+OUTPUT_DIR = '/content/drive/MyDrive/복지/김보현/계층적cluster'
+
+TARGET_CLUSTER_COUNTS = [100, 200, 300, 400]
+
+# Word2Vec parameters
+VECTOR_SIZE = 100
+WINDOW = 5
+MIN_COUNT = 1
+
+# Weights
+WEIGHT_DEF = 0.9   
+WEIGHT_WORD = 0.1  
+
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # 데이터 로드
+    print(f"Loading data from: {INPUT_FILE_PATH}")
+    if os.path.exists(INPUT_FILE_PATH):
+        raw_df = pd.read_csv(INPUT_FILE_PATH)
+        words = raw_df['Words'].fillna('').astype(str).tolist()
+        definitions = raw_df['Definitions'].fillna('').astype(str).tolist()
+        print(f"Total records: {len(words)}")
+    else:
+        print("Error: File not found.")
+        return
+
+    # Word2Vec 학습 및 가중치 임베딩 생성
+    print("Preparing Word2Vec training data...")
+    sentences = []
+    
+    for w, d in zip(words, definitions):
+        target_word = w.strip()
+        definition_tokens = d.split()
+        sentences.append([target_word] + definition_tokens)
+
+    print(f"Training Word2Vec model (Vector Size: {VECTOR_SIZE})...")
+    model = Word2Vec(
+        sentences=sentences,
+        vector_size=VECTOR_SIZE,
+        window=WINDOW,
+        min_count=MIN_COUNT,
+        workers=4,
+        sg=1 
+    )
+    
+    print("Applying embedding weights...")
+    embedding_list = []
+    valid_words = [] 
+    
+    for w, d in zip(words, definitions):
+        w = w.strip()
+        
+        # 1) 단어 벡터
+        if w in model.wv:
+            vec_word = model.wv[w]
+        else:
+            vec_word = np.zeros(VECTOR_SIZE)
+            
+        # 2) 정의 벡터
+        d_tokens = d.split()
+        valid_tokens = [t for t in d_tokens if t in model.wv]
+        
+        if valid_tokens:
+            token_vectors = model.wv[valid_tokens] 
+            vec_def = np.mean(token_vectors, axis=0)
+        else:
+            vec_def = np.zeros(VECTOR_SIZE)
+            
+        # 3) 가중 합산
+        final_vec = (WEIGHT_DEF * vec_def) + (WEIGHT_WORD * vec_word)
+        
+        embedding_list.append(final_vec)
+        valid_words.append(w)
+
+    initial_vectors = np.array(embedding_list)
+    print(f"Word2Vec shape: {initial_vectors.shape}")
+
+    norm_vectors = normalize(initial_vectors)
+
+    # UMAP 차원 축소
+    print("Applying UMAP...")
+    reducer = umap.UMAP(
+        n_neighbors=15,    
+        min_dist=0.0,      
+        n_components=10,   
+        metric='cosine',   
+        random_state=42
+    )
+    final_vectors = reducer.fit_transform(norm_vectors)
+    print(f"UMAP shape: {final_vectors.shape}")
+
+    # 계층적 클러스터링
+    print("Calculating hierarchical clustering (Ward)...")
+    Z = linkage(final_vectors, method='ward')
+
+    print("\n--- Clustering Evaluation ---")
+
+    for n_clusters in TARGET_CLUSTER_COUNTS:
+        labels = fcluster(Z, n_clusters, criterion='maxclust')
+
+        # 실루엣 스코어 계산
+        try:
+            sil_score = silhouette_score(final_vectors, labels, metric='euclidean')
+        except Exception:
+            sil_score = -1
+
+        # 응집도 계산
+        cohesions = []
+        unique_labels = np.unique(labels)
+
+        for label in unique_labels:
+            indices = np.where(labels == label)[0]
+            if len(indices) < 2:
+                cohesions.append(1.0)
+                continue
+            
+            group_vecs = final_vectors[indices]
+            sim_mat = cosine_similarity(group_vecs)
+            np.fill_diagonal(sim_mat, np.nan)
+            cohesions.append(np.nanmean(sim_mat))
+
+        avg_cohesion = np.mean(cohesions)
+
+        print(f"K={n_clusters:<4} | Silhouette: {sil_score:.4f} | Cohesion: {avg_cohesion:.4f}")
+
+        # 결과 저장
+        if sil_score >= 0.35:
+            cluster_map = defaultdict(list)
+            for w, l in zip(words, labels):
+                cluster_map[l].append(w)
+
+            output_rows = []
+            for cid, wlist in cluster_map.items():
+                output_rows.append({
+                    'cluster_id': cid,
+                    'cluster_words': ', '.join(wlist),
+                    'count': len(wlist)
+                })
+            
+            result_df = pd.DataFrame(sorted(output_rows, key=lambda x: x['cluster_id']))
+            file_name = f'hi_W2V_UMAP_K{n_clusters}_Sil{sil_score:.2f}.csv'
+            save_path = os.path.join(OUTPUT_DIR, file_name)
+            
+            result_df.to_csv(save_path, index=False, encoding='utf-8-sig')
+            print(f"  -> Saved: {file_name}")
+        else:
+            print(f"  -> Skipped (Silhouette < 0.35)")
+
+    print("\nProcess completed.")
+
+if __name__ == "__main__":
+    main()
