@@ -1,0 +1,133 @@
+# 1. 라이브러리 설치
+# !pip install scikit-learn pandas scipy umap-learn
+
+import pandas as pd
+import numpy as np
+import os
+from sklearn.feature_extraction.text import TfidfVectorizer
+from scipy.cluster.hierarchy import linkage, fcluster
+from sklearn.preprocessing import normalize
+from sklearn.metrics import silhouette_score
+from sklearn.metrics.pairwise import cosine_similarity
+from collections import defaultdict
+import umap.umap_ as umap
+from google.colab import drive
+
+# 2. 드라이브 마운트
+drive.mount('/content/drive')
+
+# Configuration
+INPUT_FILE_PATH = '/content/drive/MyDrive/복지/김보현/휴먼전처리/def3_fill.csv'
+SAVE_FOLDER = '/content/drive/MyDrive/복지/김보현/계층적cluster/'
+
+TARGET_CLUSTERS = [100, 200, 300, 400]
+
+WEIGHT_DEF = 0.9   
+WEIGHT_WORD = 0.1  
+MAX_FEATURES = 5000
+
+def main():
+    os.makedirs(SAVE_FOLDER, exist_ok=True)
+
+    # 데이터 로드
+    print(f"Loading data from: {INPUT_FILE_PATH}")
+    if not os.path.exists(INPUT_FILE_PATH):
+        print("Error: File not found.")
+        return
+
+    raw_df = pd.read_csv(INPUT_FILE_PATH)
+    words = raw_df['Words'].fillna('').astype(str).tolist()
+    definitions = raw_df['Definitions'].fillna('').astype(str).tolist()
+    print(f"Total records: {len(words)}")
+
+    # TF-IDF 벡터화 및 가중치 적용
+    print("Starting TF-IDF vectorization...")
+    all_text = words + definitions
+    
+    vectorizer = TfidfVectorizer(
+        analyzer='char',
+        ngram_range=(1, 1),
+        max_features=MAX_FEATURES
+    )
+    vectorizer.fit(all_text)
+    
+    tfidf_def = vectorizer.transform(definitions)
+    tfidf_word = vectorizer.transform(words)
+    
+    weighted_matrix = (tfidf_def * WEIGHT_DEF) + (tfidf_word * WEIGHT_WORD)
+    initial_vectors = weighted_matrix.toarray().astype(np.float32)
+    print(f"TF-IDF shape: {initial_vectors.shape}")
+
+    norm_vectors = normalize(initial_vectors)
+
+    # UMAP 차원 축소
+    print("Applying UMAP...")
+    reducer = umap.UMAP(
+        n_neighbors=15,
+        min_dist=0.0,
+        n_components=10,
+        metric='cosine',   
+        random_state=42
+    )
+    final_vectors = reducer.fit_transform(norm_vectors)
+    print(f"UMAP shape: {final_vectors.shape}")
+
+    # 계층적 클러스터링
+    print("Calculating hierarchical clustering (Ward)...")
+    Z = linkage(final_vectors, method='ward')
+
+    print("\n--- Clustering Evaluation ---")
+
+    for n_clusters in TARGET_CLUSTERS:
+        labels = fcluster(Z, n_clusters, criterion='maxclust')
+
+        # 실루엣 스코어 계산
+        try:
+            sil_score = silhouette_score(final_vectors, labels, metric='euclidean')
+        except Exception:
+            sil_score = -1 
+
+        # 응집도 계산
+        cohesions = []
+        unique_labels = np.unique(labels)
+
+        for label in unique_labels:
+            indices = np.where(labels == label)[0]
+            if len(indices) < 2:
+                cohesions.append(1.0) 
+                continue
+            
+            group_vecs = final_vectors[indices]
+            sim_mat = cosine_similarity(group_vecs)
+            np.fill_diagonal(sim_mat, np.nan) 
+            cohesions.append(np.nanmean(sim_mat))
+
+        avg_cohesion = np.mean(cohesions)
+
+        print(f"K={n_clusters:<4} | Silhouette: {sil_score:.4f} | Cohesion: {avg_cohesion:.4f}")
+
+        # 결과 저장 (실루엣 스코어 0.35 이상)
+        if sil_score >= 0.35: 
+            cluster_map = defaultdict(list)
+            for word, cluster_id in zip(words, labels):
+                cluster_map[cluster_id].append(word)
+
+            output_rows = []
+            for cluster_id, word_list in cluster_map.items():
+                output_rows.append({
+                    'cluster_id': cluster_id,
+                    'cluster_words': ', '.join(word_list),
+                    'count': len(word_list)
+                })
+            
+            result_df = pd.DataFrame(sorted(output_rows, key=lambda x: x['cluster_id']))
+            output_filename = f"hi_TFIDF_UMAP_K{n_clusters}_Sil{sil_score:.2f}.csv"
+            output_path = os.path.join(SAVE_FOLDER, output_filename)
+            
+            result_df.to_csv(output_path, index=False, encoding='utf-8-sig')
+            print(f"  -> Saved: {output_filename}")
+
+    print("\nProcess completed.")
+
+if __name__ == "__main__":
+    main()
