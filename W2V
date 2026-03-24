@@ -1,5 +1,4 @@
-# 1. 라이브러리 설치
-# !pip install gensim pandas scikit-learn scipy umap-learn
+!pip install gensim pandas scikit-learn scipy umap-learn
 
 import pandas as pd
 import numpy as np
@@ -12,8 +11,6 @@ from sklearn.metrics.pairwise import cosine_similarity
 from collections import defaultdict
 import umap.umap_ as umap
 from google.colab import drive
-
-# 2. 드라이브 마운트
 drive.mount('/content/drive')
 
 # Configuration
